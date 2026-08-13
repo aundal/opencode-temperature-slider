@@ -1,0 +1,41 @@
+{
+  "name": "@aundal/opencode-temperature-slider",
+  "version": "0.1.0",
+  "description": "OpenCode plugin with a spring-loaded temperature slider in the TUI that changes the LLM temperature per request without restarting.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aundal/opencode-temperature-slider.git"
+  },
+  "homepage": "https://github.com/aundal/opencode-temperature-slider#readme",
+  "bugs": {
+    "url": "https://github.com/aundal/opencode-temperature-slider/issues"
+  },
+  "exports": {
+    "./server": "./src/temperature.ts",
+    "./tui": "./src/temperature-slider.tsx"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "temperature",
+    "slider",
+    "tui"
+  ],
+  "dependencies": {
+    "@opentui/solid": "0.4.0",
+    "solid-js": "1.9.12"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.4.0"
+  },
+  "engines": {
+    "opencode": ">=1.18.0"
+  }
+}
