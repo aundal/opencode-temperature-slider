@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { createSignal, onCleanup } from "solid-js"
+import { createEffect, createSignal, onCleanup } from "solid-js"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { extend } from "@opentui/solid"
@@ -28,8 +28,19 @@ const VIEWPORT_SIZE = 1
 const SPRING_FRAME_MS = 16
 const DEFAULT_TEMPERATURE = 0.7
 
+type TemperatureState = {
+  version: number
+  models: Record<string, { temperature: number }>
+}
+
+let activeModelKey: string | undefined
+
 function stateFile(directory: string): string {
   return join(directory, ".opencode", "temperature.json")
+}
+
+function kvKey(modelKey: string): string {
+  return `${KV_KEY}:${modelKey}`
 }
 
 function clamp(value: number): number {
@@ -40,58 +51,111 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100
 }
 
-function readFileValue(directory: string): number | undefined {
+function readState(directory: string): TemperatureState | undefined {
   try {
     if (!existsSync(stateFile(directory))) return undefined
-    const parsed = JSON.parse(readFileSync(stateFile(directory), "utf8"))
-    const value = Number(parsed?.temperature)
-    if (!Number.isFinite(value)) return undefined
-    return clamp(value)
+    const parsed = JSON.parse(readFileSync(stateFile(directory), "utf8")) as TemperatureState
+    if (!parsed || typeof parsed !== "object" || !parsed.models) return undefined
+    return parsed
   } catch {
     return undefined
   }
 }
 
-function writeState(api: TuiPluginApi, value: number): void {
+function readModelValue(directory: string, modelKey: string): number | undefined {
+  const state = readState(directory)
+  const value = state?.models?.[modelKey]?.temperature
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
+  return clamp(value)
+}
+
+function writeState(api: TuiPluginApi, modelKey: string, value: number): void {
   try {
     const directory = api.state.path.directory
-    if (!directory) return
-    const file = stateFile(directory)
-    mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(file, JSON.stringify({ temperature: value }, null, 2))
+    if (directory) {
+      const file = stateFile(directory)
+      mkdirSync(dirname(file), { recursive: true })
+      const state = readState(directory) ?? { version: 1, models: {} }
+      state.models[modelKey] = { temperature: value }
+      writeFileSync(file, JSON.stringify(state, null, 2))
+    }
   } catch {
     // keep KV state even if the file write fails
   }
-  api.kv.set(KV_KEY, value)
+  api.kv.set(kvKey(modelKey), value)
 }
 
-function initialValue(api: TuiPluginApi): number {
-  const stored = api.kv.get(KV_KEY)
+function clearState(api: TuiPluginApi, modelKey: string): void {
+  try {
+    const directory = api.state.path.directory
+    if (directory) {
+      const file = stateFile(directory)
+      const state = readState(directory)
+      if (state) {
+        delete state.models[modelKey]
+        if (Object.keys(state.models).length === 0) {
+          rmSync(file, { force: true })
+        } else {
+          writeFileSync(file, JSON.stringify(state, null, 2))
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  api.kv.set(kvKey(modelKey), undefined)
+}
+
+function loadModelValue(api: TuiPluginApi, modelKey: string): number {
+  const stored = api.kv.get<number>(kvKey(modelKey))
   if (typeof stored === "number" && Number.isFinite(stored)) return clamp(stored)
-  const file = readFileValue(api.state.path.directory)
+  const file = readModelValue(api.state.path.directory, modelKey)
   if (file !== undefined) return file
   return DEFAULT_TEMPERATURE
 }
 
-async function configTemperature(api: TuiPluginApi): Promise<number | undefined> {
-  try {
-    const directory = api.state.path.directory
-    if (!directory) return undefined
-    const config = (await api.client.config.get(
-      { directory },
-      { throwOnError: true, responseStyle: "data" },
-    )) as { agent?: Record<string, { temperature?: number }>; default_agent?: string }
-    const agentName = config.default_agent ?? "build"
-    const value = config?.agent?.[agentName]?.temperature
-    return typeof value === "number" && Number.isFinite(value) ? clamp(value) : undefined
-  } catch {
+function resolveModelKey(api: TuiPluginApi): string | undefined {
+  const route = api.route.current
+  if (route.name === "session") {
+    const sessionID = (route.params as { sessionID?: string }).sessionID
+    if (!sessionID) return undefined
+    const messages = api.state.session.messages(sessionID)
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]
+      if (message.role === "user" && message.model?.modelID) {
+        return `${message.model.providerID}/${message.model.modelID}`
+      }
+      if (message.role === "assistant" && message.modelID) {
+        return `${message.providerID}/${message.modelID}`
+      }
+    }
     return undefined
   }
+  const config = api.state.config
+  const agentName = config.default_agent ?? "build"
+  const model = config.agent?.[agentName]?.model ?? config.model
+  return typeof model === "string" && model.includes("/") ? model : undefined
+}
+
+function modelSupportsTemperature(api: TuiPluginApi, modelKey: string): boolean {
+  const [providerID, modelID] = modelKey.split("/")
+  const provider = api.state.provider.find((p) => p.id === providerID)
+  const model = provider?.models?.[modelID]
+  return model ? model.capabilities.temperature !== false : true
+}
+
+function configTemperature(api: TuiPluginApi): number | undefined {
+  const config = api.state.config
+  const agentName = config.default_agent ?? "build"
+  const value = config.agent?.[agentName]?.temperature
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value) : undefined
 }
 
 function SpringTempControl(props: { api: TuiPluginApi }) {
   const api = props.api
-  const [temp, setTemp] = createSignal(initialValue(api))
+  const [modelKey, setModelKey] = createSignal<string | undefined>(undefined)
+  const [disabled, setDisabled] = createSignal(true)
+  const [temp, setTemp] = createSignal(DEFAULT_TEMPERATURE)
   const [visual, setVisual] = createSignal(CENTER)
   let direction = 1
   let tickTimer: ReturnType<typeof setInterval> | undefined
@@ -102,17 +166,35 @@ function SpringTempControl(props: { api: TuiPluginApi }) {
     if (springTimer) clearInterval(springTimer)
   })
 
-  void configTemperature(api).then((value) => {
-    if (value === undefined) return
-    if (typeof api.kv.get(KV_KEY) === "number") return
-    if (readFileValue(api.state.path.directory) !== undefined) return
-    setTemp(value)
+  createEffect(() => {
+    const key = resolveModelKey(api)
+    activeModelKey = key
+    setModelKey(key)
+  })
+
+  createEffect(() => {
+    const key = modelKey()
+    if (!key) {
+      setDisabled(true)
+      return
+    }
+    const supports = modelSupportsTemperature(api, key)
+    setDisabled(!supports)
+    if (!supports) return
+    setTemp(loadModelValue(api, key))
+    setVisual(CENTER)
+    const configValue = configTemperature(api)
+    if (configValue !== undefined && api.kv.get<number>(kvKey(key)) === undefined && readModelValue(api.state.path.directory, key) === undefined) {
+      setTemp(configValue)
+    }
   })
 
   const tick = (dir: number) => {
+    const key = modelKey()
+    if (!key) return
     const next = clamp(round2(temp() + dir * STEP))
     setTemp(next)
-    writeState(api, next)
+    writeState(api, key, next)
   }
 
   const startRepeat = (dir: number) => {
@@ -152,12 +234,14 @@ function SpringTempControl(props: { api: TuiPluginApi }) {
   const ref = (el: SliderRenderable) => {
     if (!el) return
     el.onMouseDown = (event: any) => {
+      if (disabled()) return
       event?.stopPropagation?.()
       event?.preventDefault?.()
       pressed = true
       startRepeat(event.x < el.x + el.width / 2 ? -1 : 1)
     }
     el.onMouseDrag = (event: any) => {
+      if (disabled()) return
       event?.stopPropagation?.()
       if (!pressed) return
       const maxPos = TRACK_WIDTH - THUMB_CELLS
@@ -173,6 +257,7 @@ function SpringTempControl(props: { api: TuiPluginApi }) {
     }
     el.onMouseUp = release
     ;(el as any).onMouseLeave = release
+    ;(el as any).onMouseOut = release
   }
 
   return (
@@ -182,14 +267,14 @@ function SpringTempControl(props: { api: TuiPluginApi }) {
         orientation="horizontal"
         min={MIN}
         max={MAX}
-        value={visual()}
+        value={disabled() ? CENTER : visual()}
         viewPortSize={VIEWPORT_SIZE}
         width={TRACK_WIDTH}
         height={1}
         backgroundColor={muted()}
-        foregroundColor={accent()}
+        foregroundColor={disabled() ? muted() : accent()}
       />
-      <text fg={accent()}>{temp().toFixed(1)}</text>
+      <text fg={disabled() ? muted() : accent()}>{disabled() ? "--" : temp().toFixed(1)}</text>
     </box>
   )
 }
@@ -216,21 +301,20 @@ const plugin: TuiPluginModule & { id: string } = {
         {
           title: "Temperature: Reset to model default",
           value: "temperature.reset",
-          description: "Clear the temperature override so the model default applies again.",
+          description: "Clear the temperature override for the current model so the model default applies again.",
           category: "Temperature",
           suggested: false,
           slash: {
             name: "temp-reset",
           },
           onSelect() {
-            try {
-              const directory = api.state.path.directory
-              if (directory) rmSync(stateFile(directory), { force: true })
-            } catch {
-              // ignore
+            const modelKey = activeModelKey
+            if (!modelKey) {
+              api.ui.toast({ variant: "info", message: "No model selected" })
+              return
             }
-            api.kv.set(KV_KEY, undefined)
-            api.ui.toast({ variant: "info", message: "Temperature override cleared" })
+            clearState(api, modelKey)
+            api.ui.toast({ variant: "info", message: `Temperature override cleared for ${modelKey}` })
           },
         },
       ]

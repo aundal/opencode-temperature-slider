@@ -1,7 +1,7 @@
 # opencode-temperature-slider
 
 A spring-loaded temperature slider for the OpenCode TUI. Drag it to change the
-LLM temperature per request — no restart needed.
+LLM temperature per model — no restart needed.
 
 ![slider](https://img.shields.io/badge/opencode-1.18%2B-blue)
 
@@ -15,7 +15,44 @@ A small slider appears next to the prompt input (session and home screens):
   the center.
 - **Release** — the thumb springs back to the center like a real spring.
 
-The current value is shown next to the slider (one decimal).
+The current value is shown next to the slider (one decimal). When no model can
+be resolved — e.g. on the home screen before a session has a model — the slider
+is disabled and shows `--`.
+
+## Per-model values
+
+Each model has its own temperature. The value follows the model, not the
+session: every session that uses the same model shares its temperature, and
+different models keep independent values. Model variants of the same model ID
+share the temperature.
+
+The TUI writes the temperature for the active model to a shared state file in
+the current project:
+
+```
+<project>/.opencode/temperature.json
+```
+
+```json
+{
+  "version": 1,
+  "models": {
+    "anthropic/claude-sonnet-4-5": {
+      "temperature": 0.7
+    },
+    "databricks/system.ai.claude-opus-5": {
+      "temperature": 1.1
+    }
+  }
+}
+```
+
+The server plugin hooks `chat.params` and reads the matching model entry on
+every request, so the temperature applies immediately — no server restart, no
+config reload.
+
+The temperature range is `0.0` to `2.0`. When no entry exists for a model, the
+model default is used.
 
 ## How it works
 
@@ -25,18 +62,6 @@ The plugin has two parts:
 | ----------------------------- | -------------- | --------------- |
 | `src/temperature.ts`          | server plugin  | `opencode.json` |
 | `src/temperature-slider.tsx`  | TUI plugin     | `tui.json`      |
-
-The TUI writes the temperature to a shared state file in the current project:
-
-```
-<project>/.opencode/temperature.json
-```
-
-The server plugin hooks `chat.params` and reads that file on every request, so
-the temperature applies immediately — no server restart, no config reload.
-
-The temperature range is `0.0` to `2.0`. When the file is missing, the model
-default is used.
 
 ## Install
 
@@ -71,8 +96,9 @@ Restart OpenCode. The slider appears next to the prompt.
 
 - Drag the slider left or right and hold to change the temperature in `0.1`
   steps every 500 ms.
-- The value is saved per project in `.opencode/temperature.json`.
-- Run `/temp-reset` to clear the override and return to the model default.
+- Values are saved per model in `.opencode/temperature.json`.
+- Run `/temp-reset` to clear the override for the current model and return to
+  the model default. With no model selected, it shows `No model selected`.
 
 ## Requirements
 

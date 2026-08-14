@@ -6,11 +6,14 @@ export function stateFile(directory: string): string {
   return join(directory, ".opencode", "temperature.json")
 }
 
-export function readTemperature(directory: string): number | undefined {
+export function readTemperature(directory: string, modelKey: string): number | undefined {
   try {
     if (!existsSync(stateFile(directory))) return undefined
-    const parsed = JSON.parse(readFileSync(stateFile(directory), "utf8"))
-    const value = Number(parsed?.temperature)
+    const parsed = JSON.parse(readFileSync(stateFile(directory), "utf8")) as {
+      version?: number
+      models?: Record<string, { temperature?: number }>
+    }
+    const value = Number(parsed?.models?.[modelKey]?.temperature)
     if (!Number.isFinite(value)) return undefined
     return Math.min(2, Math.max(0, value))
   } catch {
@@ -22,7 +25,8 @@ const server: Plugin = async ({ directory }) => {
   return {
     "chat.params": async (input, output) => {
       if (!input.model.capabilities.temperature) return
-      const value = readTemperature(directory)
+      const modelKey = `${input.model.providerID}/${input.model.id}`
+      const value = readTemperature(directory, modelKey)
       if (value !== undefined) output.temperature = value
     },
   }

@@ -1,7 +1,7 @@
 {
   "name": "@aundal/opencode-temperature-slider",
-  "version": "0.1.0",
-  "description": "OpenCode plugin with a spring-loaded temperature slider in the TUI that changes the LLM temperature per request without restarting.",
+  "version": "0.2.0",
+  "description": "OpenCode plugin with a spring-loaded temperature slider in the TUI that changes the LLM temperature per model per request without restarting.",
   "license": "MIT",
   "type": "module",
   "repository": {
